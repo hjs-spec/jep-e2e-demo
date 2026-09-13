@@ -1,115 +1,68 @@
-# JEP End-to-End Demo
+# JEP end-to-end demo
 
-A five-minute, dependency-light demo of a complete JEP accountability stack:
+A signed J/D/T/V flow using `jep-sdk-py` and a local JEP-Core-0.6 API. The demo requests invoice evidence, declares delegation, terminates that declaration and records a verification statement. It does not call a real invoice service or grant tool authority.
 
-```text
-Human
-→ Agent
-→ Tool
-→ JEP Event
-→ HJS Receipt
-→ JAC Lineage
-→ Archive
-→ Replay
-→ Verification
-```
+## Start a local API (terminal 1)
 
-The demo is intentionally **not production security**. It uses a mock agent, a mock MCP-style tool, deterministic timestamps, and SHA-256 over canonical JSON so the chain is easy to inspect and replay.
-
-## Quick start
-
-Run the full demo with one command:
+Python 3.10 or newer is required. From the parent directory of this clone:
 
 ```bash
-python demo.py
+git clone https://github.com/hjs-spec/jep-api.git
+cd jep-api
+git checkout v0.7.3
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install -r requirements.txt
+export JEP_STATE_DIR="$PWD/.local-state"
+python -m uvicorn main:app --host 127.0.0.1 --port 8000
 ```
 
-That command generates `archive.jsonl` and immediately replays it for verification.
+This starts a loopback development service and preserves its local verification keys across restarts. Keep that state directory to replay prior archives. This is not a live deployment; no public service or database is required. API software version 0.7.3 implements protocol profile `jep-core-0.6`, wire `jep: "1"`.
 
-To replay an existing archive:
+The SDK defaults to `http://127.0.0.1:8000`. Set `JEP_API_URL` to another explicitly trusted API, and `JEP_API_KEY` if it requires a signing token. Archival verification relies on that API's trusted key store.
+
+## Install and run (terminal 2)
 
 ```bash
-./jep replay archive.jsonl
+git clone https://github.com/hjs-spec/jep-e2e-demo.git
+cd jep-e2e-demo
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install -e .
+jep-e2e demo --archive archives/first.jsonl
+jep-e2e replay archives/first.jsonl
 ```
 
-If the package is installed in editable mode, the command is also available as:
+`python demo.py` also runs the real flow and chooses a unique archive name. Explicit output paths must not already exist, so existing evidence is never overwritten.
+
+The JSONL envelope contains `format`, `sequence`, `event`, `event_hash` and `previous_event_hash`. Only `event` is the signed Core object. The other fields describe this application's archive; they are not required JEP fields, HJS receipts or JAC declarations. Signed `ref` values link the four demo events. Replay verifies every signature through the API, hashes, sequence, references and expected J/D/T/V order. The `V` statement follows an actual verification of its predecessor.
+
+Success means Core Level 1 plus local demo ordering checks. It does not prove identity binding, real delegation authority, policy approval, HJS/JAC conformance, external outcomes or completeness against an independently trusted archive anchor.
+
+## Historical mock and migration
+
+The old unsigned archive is preserved byte-for-byte at `legacy/archive.jsonl`. Inspect it explicitly:
 
 ```bash
-jep replay archive.jsonl
+jep-e2e --legacy-mock replay legacy/archive.jsonl
 ```
 
-## Architecture flow
+That mode checks the old mock's hash consistency only. It does not provide cryptographic authentication. The default replay rejects old archives rather than silently upgrading their meaning.
 
-1. **Human** submits a request about invoice `INV-042`.
-2. **Mock Agent** judges that structured invoice evidence is needed before answering.
-3. **Mock MCP Tool** returns deterministic invoice validation evidence without calling any external system.
-4. **JEP Events** capture the accountable decision path:
-   - `Judgment`
-   - `Delegation`
-   - `Termination`
-   - `Verification`
-5. **HJS-style Receipt** binds each event to a deterministic `subject_hash` and mock signature.
-6. **JAC-style Lineage** links each receipt-bearing event to the previous archive line hash.
-7. **Archive** writes one JSON envelope per line to `archive.jsonl`.
-8. **Replay** recomputes hashes from the archive.
-9. **Verification** checks receipt integrity, lineage continuity, line hashes, and required event coverage.
+Version 0.2.0 renames this package's command from `jep` to `jep-e2e`. `jep` belongs to [jep-cli](https://github.com/hjs-spec/cli). If the old packages shared an environment, upgrade the old demo first, then repair CLI ownership:
 
-## Generated artifacts
-
-`python demo.py` creates:
-
-| Artifact | Purpose |
-| --- | --- |
-| `archive.jsonl` | Append-friendly JSONL archive containing JEP events, HJS-style receipts, and JAC-style lineage links. |
-| `jep_event` | The accountable event payload: type, actor, timestamp, judgment/delegation/termination/verification details. |
-| `hjs_receipt` | A receipt with issuer, subject event ID, canonical JSON hash, and mock signature. |
-| `jac_lineage` | A hash-chain link containing the previous line hash and current line hash. |
-| Replay report | Human-readable verification output from `python demo.py` or `jep replay archive.jsonl`. |
-
-A single archive line has this shape:
-
-```json
-{
-  "sequence": 1,
-  "jep_event": { "type": "Judgment", "event_id": "evt-001-judgment" },
-  "hjs_receipt": { "receipt_type": "HJS-style-receipt", "subject_hash": "..." },
-  "jac_lineage": { "lineage_type": "JAC-style-lineage-link", "previous_line_hash": "GENESIS", "line_hash": "..." }
-}
+```bash
+python -m pip install --upgrade .
+python -m pip install --force-reinstall 'jep-cli==0.6.1'
 ```
 
-## Replay output example
+GitHub releases supply wheels/source archives; installation from this repository also works. This change does not configure a new PyPI publisher.
 
-```text
-Replay verification for archive.jsonl
-Events replayed: 4
-- PASS evt-001-judgment: Judgment receipt and lineage verified
-- PASS evt-002-delegation: Delegation receipt and lineage verified
-- PASS evt-003-termination: Termination receipt and lineage verified
-- PASS evt-004-verification: Verification receipt and lineage verified
-- PASS archive: required event types present
-Verdict: PASS
+## Test
+
+```bash
+python -m pip install -e '.[test]' -r ../jep-api/requirements.txt
+JEP_API_SOURCE=../jep-api python -m pytest -q
 ```
 
-## Why this is more than logging
-
-Plain logs usually answer, "what text did the system print?" This demo shows a stronger accountability pattern:
-
-- **Typed judgment events** explain why the agent made a decision.
-- **Delegation events** identify the tool boundary and the exact mock tool input/output.
-- **Receipts** bind event content to hashes, so replay can detect event mutation.
-- **Lineage** chains each archive line to the previous one, so replay can detect reorder, deletion, or insertion.
-- **Replay verification** recomputes the archive rather than trusting runtime output.
-- **Termination and verification events** close the loop with final outcome and audit verdict.
-
-This is still a toy implementation, but it demonstrates the core JEP stack as a verifiable chain instead of an unstructured stream of logs.
-
-## Repository layout
-
-```text
-.
-├── demo.py          # one-command full demo runner
-├── jep              # executable wrapper for replay CLI
-├── jep_core.py      # mock agent, mock tool, archive, replay, verification logic
-├── pyproject.toml   # optional console-script entry point
-└── README.md
-```
+Tests use an isolated loopback API and temporary signing state. CI also checks installation alongside the standalone CLI.

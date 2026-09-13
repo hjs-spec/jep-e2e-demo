@@ -1,9 +1,23 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "jep-e2e-demo"
-version = "0.1.0"
-description = "Five-minute mock JEP accountability stack demo"
-requires-python = ">=3.9"
-dependencies = []
+version = "0.2.0"
+description = "Local signed JEP-Core-0.6 J/D/T/V end-to-end demo"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["jep-sdk-py>=0.6.2,<0.7"]
 
 [project.scripts]
-jep = "jep_core:cli"
+jep-e2e = "jep_core:cli"
+
+[project.optional-dependencies]
+test = ["pytest>=8"]
+
+[tool.setuptools]
+py-modules = ["jep_core", "legacy_demo"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
