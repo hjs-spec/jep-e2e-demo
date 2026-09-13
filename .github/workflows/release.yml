@@ -1,0 +1,44 @@
+name: Publish GitHub distributions
+on:
+  push:
+    branches: [main]
+    paths: [VERSION, '.github/workflows/release.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: release-${{ github.repository }}
+  cancel-in-progress: false
+jobs:
+  release:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/checkout@v4
+        with:
+          repository: hjs-spec/jep-api
+          ref: 45082b3e9e9e81f35596311d6a686ae5fdae5427
+          path: .test-api
+      - run: python -m pip install build twine '.[test]' -r .test-api/requirements.txt
+      - run: python -m pytest -q
+        env:
+          JEP_API_SOURCE: .test-api
+      - run: python -m build && python -m twine check dist/*
+      - run: python scripts/check_coexistence.py dist/*.whl
+      - name: Validate version and publish immutable artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python -c "import pathlib,tomllib,re; v=pathlib.Path('VERSION').read_text().strip(); assert re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+',v); assert tomllib.loads(pathlib.Path('pyproject.toml').read_text())['project']['version']==v"
+          version=$(cat VERSION)
+          if gh release view "v$version" >/dev/null 2>&1; then
+            echo 'Release already exists; refusing to overwrite it.'
+            exit 1
+          fi
+          gh release create "v$version" --target "$GITHUB_SHA" --title "v$version" --notes-file RELEASE-NOTES.md dist/*

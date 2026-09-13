@@ -1,240 +1,203 @@
-"""Tiny JEP end-to-end demo primitives.
-
-This module intentionally uses only the Python standard library and mock
-components so the accountability flow is easy to inspect in five minutes.
-"""
+"""Signed J/D/T/V example using the installed SDK and a local Core 0.6 API."""
 
 from __future__ import annotations
-
 import argparse
-import hashlib
 import json
-from datetime import datetime, timezone
+import os
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Tuple
+from uuid import uuid4
+from jep import JEPClient
 
-ARCHIVE_PATH = Path("archive.jsonl")
-DEMO_RUN_ID = "jep-demo-run-001"
-MOCK_HUMAN_PROMPT = "Summarize invoice INV-042 and decide whether to delegate validation."
-
-Event = Dict[str, Any]
-Envelope = Dict[str, Any]
+FORMAT = "jep-e2e-core-0.6"
 
 
-def canonical_json(value: Any) -> str:
-    """Return deterministic JSON for hashing and readable archives."""
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+def client():
+    return JEPClient(
+        base_url=os.environ.get("JEP_API_URL", "http://127.0.0.1:8000"),
+        api_key=os.environ.get("JEP_API_KEY", ""),
+    )
 
 
-def sha256_json(value: Any) -> str:
-    return hashlib.sha256(canonical_json(value).encode("utf-8")).hexdigest()
+def verified_hash(api, event):
+    result = api.verify_event({"event": event, "mode": "archival"})
+    if (
+        not result.valid
+        or result.profile != "jep-core-0.6"
+        or result.level < 1
+        or not result.event_hash
+    ):
+        raise ValueError(f"Core verification failed: {result.errors}")
+    return result.event_hash
 
 
-def utc_timestamp(step: int) -> str:
-    """Use deterministic timestamps so replay output is stable."""
-    return f"2026-01-01T00:00:0{step}Z"
-
-
-def mock_mcp_tool(invoice_id: str) -> Dict[str, Any]:
-    """A mock MCP tool: no network, no database, no external side effects."""
-    return {
-        "tool": "mock.mcp.invoice_validator",
-        "input": {"invoice_id": invoice_id},
-        "output": {
-            "invoice_id": invoice_id,
-            "vendor": "Example Supplies Co.",
-            "amount_usd": 128.40,
-            "policy_result": "approved",
-            "evidence": "mock purchase-order match PO-777",
-        },
-    }
-
-
-def mock_agent_session() -> List[Event]:
-    """Create Judgment, Delegation, Termination, and Verification JEP events."""
-    tool_call = mock_mcp_tool("INV-042")
-    return [
-        {
-            "event_id": "evt-001-judgment",
-            "type": "Judgment",
-            "run_id": DEMO_RUN_ID,
-            "timestamp": utc_timestamp(1),
-            "actor": "mock-agent",
-            "human_request": MOCK_HUMAN_PROMPT,
-            "judgment": {
-                "decision": "delegate_invoice_validation",
-                "rationale": "The human request needs structured invoice evidence before a final answer.",
-                "confidence": 0.82,
-            },
-        },
-        {
-            "event_id": "evt-002-delegation",
-            "type": "Delegation",
-            "run_id": DEMO_RUN_ID,
-            "timestamp": utc_timestamp(2),
-            "actor": "mock-agent",
-            "delegate_to": tool_call["tool"],
-            "tool_call": tool_call,
-        },
-        {
-            "event_id": "evt-003-termination",
-            "type": "Termination",
-            "run_id": DEMO_RUN_ID,
-            "timestamp": utc_timestamp(3),
-            "actor": "mock-agent",
-            "reason": "The mock tool returned enough evidence to answer the human request.",
-            "final_answer": "Invoice INV-042 from Example Supplies Co. is approved for $128.40.",
-        },
-        {
-            "event_id": "evt-004-verification",
-            "type": "Verification",
-            "run_id": DEMO_RUN_ID,
-            "timestamp": utc_timestamp(4),
-            "actor": "mock-verifier",
-            "checks": {
-                "receipt_hash_present": True,
-                "lineage_prev_hash_valid": True,
-                "required_event_types_present": True,
-            },
-            "verdict": "pass",
-        },
-    ]
-
-
-def hjs_receipt(event: Event) -> Dict[str, Any]:
-    """Build a compact HJS-style receipt for an event."""
-    subject_hash = sha256_json(event)
-    return {
-        "receipt_type": "HJS-style-receipt",
-        "issuer": "mock-hjs-notary",
-        "issued_at": datetime(2026, 1, 1, tzinfo=timezone.utc).isoformat().replace("+00:00", "Z"),
-        "subject_event_id": event["event_id"],
-        "subject_hash_alg": "sha256-canonical-json",
-        "subject_hash": subject_hash,
-        "signature": f"mock-signature:{subject_hash[:24]}",
-    }
-
-
-def jac_lineage(event: Event, receipt: Dict[str, Any], previous_line_hash: str) -> Dict[str, Any]:
-    """Build one JAC-style lineage link over the event and its receipt."""
-    link_material = {
-        "event_hash": sha256_json(event),
-        "receipt_hash": sha256_json(receipt),
-        "previous_line_hash": previous_line_hash,
-    }
-    return {
-        "lineage_type": "JAC-style-lineage-link",
-        "event_id": event["event_id"],
-        "previous_line_hash": previous_line_hash,
-        "line_hash_alg": "sha256-canonical-json",
-        "line_hash": sha256_json(link_material),
-    }
-
-
-def build_archive(events: Iterable[Event]) -> List[Envelope]:
-    """Wrap JEP events with receipts and lineage links."""
-    envelopes: List[Envelope] = []
-    previous = "GENESIS"
-    for sequence, event in enumerate(events, start=1):
-        receipt = hjs_receipt(event)
-        lineage = jac_lineage(event, receipt, previous)
-        envelope = {
-            "sequence": sequence,
-            "jep_event": event,
-            "hjs_receipt": receipt,
-            "jac_lineage": lineage,
-        }
-        envelopes.append(envelope)
-        previous = lineage["line_hash"]
-    return envelopes
-
-
-def write_archive(envelopes: Iterable[Envelope], archive_path: Path = ARCHIVE_PATH) -> None:
-    with archive_path.open("w", encoding="utf-8") as handle:
-        for envelope in envelopes:
-            handle.write(json.dumps(envelope, sort_keys=True, ensure_ascii=False) + "\n")
-
-
-def read_archive(archive_path: Path) -> List[Envelope]:
-    with archive_path.open("r", encoding="utf-8") as handle:
-        return [json.loads(line) for line in handle if line.strip()]
-
-
-def verify_archive(envelopes: List[Envelope]) -> Tuple[bool, List[str]]:
-    """Replay archive lines and verify receipt hashes plus lineage continuity."""
-    messages: List[str] = []
-    required = {"Judgment", "Delegation", "Termination", "Verification"}
-    seen = set()
-    previous = "GENESIS"
-
-    for envelope in envelopes:
-        event = envelope["jep_event"]
-        receipt = envelope["hjs_receipt"]
-        lineage = envelope["jac_lineage"]
-        seen.add(event["type"])
-
-        event_hash = sha256_json(event)
-        receipt_hash = sha256_json(receipt)
-        expected_line_hash = sha256_json(
+def build_archive():
+    api = client()
+    records = []
+    previous = None
+    steps = [
+        ("J", {"claim": "request invoice evidence", "subject": "INV-042"}),
+        (
+            "D",
             {
-                "event_hash": event_hash,
-                "receipt_hash": receipt_hash,
-                "previous_line_hash": previous,
+                "claim": "delegate",
+                "delegatee": "did:example:invoice-tool",
+                "scope": ["read"],
+            },
+        ),
+        ("T", {"claim": "terminate", "termination_scope": "delegation"}),
+        ("V", {"verification_scope": ["syntax", "cryptographic"]}),
+    ]
+    for sequence, (verb, what) in enumerate(steps, 1):
+        if verb == "T":
+            what["target"] = previous
+        # Every predecessor is actually verified before the next statement is signed.
+        if records:
+            verified_hash(api, records[-1]["event"])
+        response = api.create_event(
+            {
+                "verb": verb,
+                "who": "did:example:e2e-agent",
+                "what": what,
+                "aud": "jep-e2e-demo",
+                "ref": previous,
             }
         )
-
-        if receipt["subject_hash"] != event_hash:
-            messages.append(f"FAIL {event['event_id']}: receipt subject hash mismatch")
-        if lineage["previous_line_hash"] != previous:
-            messages.append(f"FAIL {event['event_id']}: lineage previous hash mismatch")
-        if lineage["line_hash"] != expected_line_hash:
-            messages.append(f"FAIL {event['event_id']}: lineage line hash mismatch")
-
-        if not messages or not messages[-1].startswith(f"FAIL {event['event_id']}"):
-            messages.append(f"PASS {event['event_id']}: {event['type']} receipt and lineage verified")
-        previous = lineage["line_hash"]
-
-    missing = required - seen
-    if missing:
-        messages.append(f"FAIL archive: missing required event types {sorted(missing)}")
-    else:
-        messages.append("PASS archive: required event types present")
-
-    return not any(message.startswith("FAIL") for message in messages), messages
+        event = response.event.to_dict()
+        digest = verified_hash(api, event)
+        if digest != response.event_hash:
+            raise ValueError("Creation and verification hashes differ")
+        records.append(
+            {
+                "format": FORMAT,
+                "sequence": sequence,
+                "event": event,
+                "event_hash": digest,
+                "previous_event_hash": previous,
+            }
+        )
+        previous = digest
+    return records
 
 
-def print_replay_report(archive_path: Path, envelopes: List[Envelope]) -> bool:
-    ok, messages = verify_archive(envelopes)
-    print(f"Replay verification for {archive_path}")
-    print(f"Events replayed: {len(envelopes)}")
-    for message in messages:
-        print(f"- {message}")
-    print(f"Verdict: {'PASS' if ok else 'FAIL'}")
-    return ok
+def write_archive(records, path):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("x", encoding="utf-8") as handle:
+        for record in records:
+            handle.write(json.dumps(record, ensure_ascii=False, allow_nan=False) + "\n")
 
 
-def run_demo(archive_path: Path = ARCHIVE_PATH) -> bool:
-    events = mock_agent_session()
-    envelopes = build_archive(events)
-    write_archive(envelopes, archive_path)
-
-    print("Human → Agent → Tool → JEP Event → HJS Receipt → JAC Lineage → Archive")
-    print(f"Generated {archive_path} with {len(envelopes)} JSONL records")
-    print()
-    return print_replay_report(archive_path, envelopes)
+def strict_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"Duplicate archive member: {key}")
+        result[key] = value
+    return result
 
 
-def cli(argv: List[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="jep", description="Replay and verify a JEP demo archive")
-    subparsers = parser.add_subparsers(dest="command", required=True)
-    replay_parser = subparsers.add_parser("replay", help="replay and verify archive.jsonl")
-    replay_parser.add_argument("archive", type=Path, help="path to archive.jsonl")
+def reject_constant(value):
+    raise ValueError(f"Non-finite archive value: {value}")
+
+
+def read_archive(path):
+    with Path(path).open(encoding="utf-8") as handle:
+        return [
+            json.loads(
+                line, object_pairs_hook=strict_object, parse_constant=reject_constant
+            )
+            for line in handle
+        ]
+
+
+def verify_archive(records):
+    if len(records) != 4:
+        raise ValueError("This demo requires exactly four J/D/T/V records")
+    api = client()
+    previous = None
+    for sequence, (record, verb) in enumerate(zip(records, "JDTV"), 1):
+        if not isinstance(record, dict) or record.get("format") != FORMAT:
+            raise ValueError(
+                "Unsupported archive; historical mocks require --legacy-mock"
+            )
+        if type(record.get("sequence")) is not int or record["sequence"] != sequence:
+            raise ValueError("Archive sequence mismatch")
+        event = record.get("event")
+        if not isinstance(event, dict) or event.get("verb") != verb:
+            raise ValueError("Demo verb order mismatch")
+        if (
+            event.get("ref") != previous
+            or record.get("previous_event_hash") != previous
+        ):
+            raise ValueError("Archive reference mismatch")
+        digest = verified_hash(api, event)
+        if record.get("event_hash") != digest:
+            raise ValueError("Archive event hash mismatch")
+        if verb == "T" and event.get("what", {}).get("target") != previous:
+            raise ValueError("Termination target mismatch")
+        previous = digest
+    return {
+        "ok": True,
+        "events": 4,
+        "profile": "jep-core-0.6",
+        "level": 1,
+        "checks": ["syntax", "cryptographic", "local-demo-order"],
+        "last_event_hash": previous,
+    }
+
+
+def run_demo(archive_path=None):
+    path = (
+        Path(archive_path)
+        if archive_path
+        else Path("archives") / f"demo-{uuid4()}.jsonl"
+    )
+    records = build_archive()
+    write_archive(records, path)
+    report = verify_archive(read_archive(path))
+    print(f"Signed J/D/T/V archive: {path}")
+    print(json.dumps(report, indent=2))
+    print(
+        "Level 1 plus local demo order checks; no identity, authority, HJS/JAC or log completeness claim."
+    )
+    return True
+
+
+def cli(argv=None):
+    parser = argparse.ArgumentParser(prog="jep-e2e", description=__doc__)
+    parser.add_argument(
+        "--legacy-mock",
+        action="store_true",
+        help="explicitly replay historical mock data",
+    )
+    sub = parser.add_subparsers(dest="command", required=True)
+    demo = sub.add_parser("demo", help="create and verify real signed J/D/T/V events")
+    demo.add_argument("--archive", type=Path)
+    replay = sub.add_parser("replay", help="verify an existing archive")
+    replay.add_argument("archive", type=Path)
     args = parser.parse_args(argv)
+    try:
+        if args.legacy_mock:
+            import legacy_demo
 
-    if args.command == "replay":
-        envelopes = read_archive(args.archive)
-        return 0 if print_replay_report(args.archive, envelopes) else 1
-    return 2
+            if args.command == "demo":
+                parser.error(
+                    "Historical mock mode is replay-only; use the checked-in legacy/archive.jsonl"
+                )
+            return (
+                0
+                if legacy_demo.print_replay_report(
+                    args.archive, legacy_demo.read_archive(args.archive)
+                )
+                else 1
+            )
+        if args.command == "demo":
+            run_demo(args.archive)
+        else:
+            print(json.dumps(verify_archive(read_archive(args.archive)), indent=2))
+        return 0
+    except (ValueError, OSError) as exc:
+        parser.exit(1, f"Verification failed: {exc}\n")
 
 
 if __name__ == "__main__":
