@@ -1,3 +1,7 @@
+> **Historical Core 0.6 example — 2026-09-26.**
+>
+> For current Core 0.7 onboarding, use [jep-quickstart](https://github.com/hjs-spec/jep-quickstart). This repository and its published v0.2.0 release preserve a historical Core 0.6 J/D/T/V demonstration. Existing signed archives and explicit legacy formats retain their original meaning; this example is retired from active onboarding.
+
 # JEP end-to-end demo
 
 A signed J/D/T/V flow using `jep-sdk-py` and a local JEP-Core-0.6 API. The demo requests invoice evidence, declares delegation, terminates that declaration and records a verification statement. It does not call a real invoice service or grant tool authority.
